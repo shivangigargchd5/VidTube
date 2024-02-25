@@ -3,7 +3,9 @@ import { ApiError } from "../utils/ApiError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { uploadOnCloudinary } from "../utils/cloudinary.js";
 import { User } from "../models/user.models.js";
+import { Subscription } from "../models/subscription.model.js";
 import jwt from "jsonwebtoken";
+import mongoose from "mongoose";
 
 const options = { httpOnly: true, secure: true }
 
@@ -202,7 +204,7 @@ const updateAccountDetails = asyncHandler(async (req, res) => {
 
 const updateUserAvatar = asyncHandler(async (req, res) => {
     console.log(req);
-    const avatarLocalPath = req?.files?.avatar?.[0]?.path;
+    const avatarLocalPath = req?.file?.path;
 
     if (!avatarLocalPath) {
         throw new ApiError(400, "Invalid avatar passed");
@@ -230,7 +232,7 @@ const updateUserAvatar = asyncHandler(async (req, res) => {
 });
 
 const updateCoverImage = asyncHandler(async (req, res) => {
-    const coverImageLocalPath = req?.files?.coverImage?.[0]?.path;
+    const coverImageLocalPath = req?.file?.path;
 
     if (!coverImageLocalPath) {
         throw new ApiError(400, "Invalid coverImage passed");
@@ -257,6 +259,158 @@ const updateCoverImage = asyncHandler(async (req, res) => {
     return res.status(200).json(new ApiResponse(200, user, "coverImage has been updated successfully"));
 });
 
+const subscribeToChannel = asyncHandler(async (req, res) => {
+    const { username } = req.params;
+
+    if (!username) {
+        throw new ApiError(400, "Couldn't find any such channel");
+    }
+
+    const channel = await User.find({ username });
+
+    if (!channel?.length) {
+        throw new ApiError(400, "Couldn't find any such channel");
+    }
+
+    const subscriber = req.user?._id;
+
+    const alreadySubscribed = await Subscription.findOne(
+        {
+            subscriber: subscriber,
+            channel: channel[0]?._id
+        }
+    );
+
+    if (alreadySubscribed) {
+        throw new ApiError(400, "Already subscribed");
+    }
+
+    const subscription = await Subscription.create({
+        subscriber: subscriber,
+        channel: channel[0]?._id
+    });
+
+    const subscriptionCreated = await Subscription.findById(subscription?._id);
+
+    if (!subscriptionCreated) {
+        throw new ApiError(400, "Failed to subscribe to the channel");
+    }
+
+    return res.status(200).json(new ApiResponse(200, subscriptionCreated, "Subscribed successfully to the channel"));
+
+});
+
+const getChannelProfile = asyncHandler(async (req, res) => {
+    const { username } = req.params;
+    if (!username?.trim()) {
+        throw new ApiError(400, "Username not found");
+    }
+    const channel = await User.aggregate([
+        {
+            $match: {
+                username: username?.toLowerCase()   //find the channel entry in User schema
+            }
+        },
+        {
+            $lookup: {
+                from: "subscriptions",
+                localField: "_id",                  //get a list of users subscribed to this channel
+                foreignField: "channel",
+                as: "subscribers"
+            }
+        },
+        {
+            $lookup: {
+                from: "subscriptions",
+                localField: "_id",                  //get a list of channels the user channel has subscribed to
+                foreignField: "subscriber",
+                as: "subscribedTo"
+            }
+        },
+        {
+            $addFields: {
+                subscribersCount: {
+                    $size: "$subscribers"
+                },
+                subscribedToCount: {
+                    $size: "$subscribedTo"
+                },
+                isSubscribed: {
+                    $cond: {
+                        if: { $in: [req.user?._id, "$subscribers.subscriber"] },
+                        then: true,
+                        else: false,
+                    }
+                }
+            }
+        },
+        {
+            $project: {
+                fullname: 1,
+                email: 1,
+                username: 1,
+                subscribedToCount: 1,
+                subscribersCount: 1,
+                avatar: 1,
+                coverImage: 1,
+                isSubscribed: 1,
+            }
+        }
+    ]);
+
+    if (!channel?.length) {
+        throw new ApiError(400, "Channel doesn't exit");
+    }
+
+    return res.status(200).json(new ApiResponse(200, channel[0], "Channel details have been fetched"));
+});
+
+const getWatchHistory = asyncHandler(async (req, res) => {
+    const user = await User.aggregate([
+        {
+            $match: {
+                _id: new mongoose.Types.ObjectId(req.user?._id)
+            }
+        },
+        {
+            $lookup: {
+                from: "videos",
+                localField: "watchHistory",
+                foreignField: "_id",
+                as: "watchHistory",
+                pipeline: [
+                    {
+                        $lookup: {
+                            from: "users",
+                            localField: "owner",
+                            foreignField: "_id",
+                            as: "owner",
+                            pipeline: [
+                                {
+                                    $project: {
+                                        fullname: 1,
+                                        username: 1,
+                                        avatar: 1
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        $addFields: {
+                            owner: {
+                                $first: "$owner"
+                            }
+                        }
+                    }
+                ]
+            }
+        }
+    ]);
+
+    return res.status(200).json(new ApiResponse(200, user[0].watchHistory, "Watch history has been fetched successfully"));
+})
+
 export {
     registerUser,
     loginUser,
@@ -267,4 +421,7 @@ export {
     updateAccountDetails,
     updateUserAvatar,
     updateCoverImage,
+    subscribeToChannel,
+    getChannelProfile,
+    getWatchHistory,
 }
